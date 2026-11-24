@@ -1,0 +1,104 @@
+name: Verify APK (official core, unsigned debug)
+
+# 目的：在 fork 中验证 Android 构建链路可用——用官方 vnt 核心的 vnt-jni.so
+# 构建可直接安装的 debug APK。不依赖任何签名 secret（debug 用 Android 标准签名）。
+# 这是验证流水线，不改官方 android-release.yml，也不产出对外发布包。
+
+on:
+  workflow_dispatch:
+    inputs:
+      vnt_tag:
+        description: 'vnt-dev/vnt release tag to take vnt-jni-<abi>-<tag>.so from'
+        required: false
+        default: 'v2.0.11'
+
+permissions:
+  contents: read
+
+env:
+  VNT_REPOSITORY: vnt-dev/vnt
+
+jobs:
+  build-debug-apk:
+    name: Build debug APK (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: arm64-v8a
+            abis: arm64-v8a
+          - variant: universal
+            abis: arm64-v8a armeabi-v7a x86_64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android platform and build tools
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
+
+      - name: Download and verify vnt-jni
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ABIS: ${{ matrix.abis }}
+          VNT_TAG: ${{ inputs.vnt_tag }}
+        run: |
+          set -euo pipefail
+          rm -rf app/src/main/jniLibs
+          mkdir -p native
+          for abi in $ABIS; do
+            asset="vnt-jni-${abi}-${VNT_TAG}.so"
+            mkdir -p "app/src/main/jniLibs/$abi"
+            gh release download "$VNT_TAG" \
+              --repo "$VNT_REPOSITORY" \
+              --pattern "$asset" \
+              --pattern "$asset.sha256" \
+              --dir native
+            (cd native && sha256sum -c "$asset.sha256")
+            install -m 755 "native/$asset" "app/src/main/jniLibs/$abi/libvnt_jni.so"
+          done
+
+      - name: Build debug APK
+        env:
+          VARIANT: ${{ matrix.variant }}
+          VNT_TAG: ${{ inputs.vnt_tag }}
+        run: |
+          set -euo pipefail
+          gradle_args=(--no-daemon assembleDebug -PvntCoreTag="$VNT_TAG")
+          if [[ "$VARIANT" != "universal" ]]; then
+            gradle_args+=(-PvntAbi="$VARIANT")
+          fi
+          ./gradlew "${gradle_args[@]}"
+
+      - name: Verify embedded JNI libs
+        env:
+          ABIS: ${{ matrix.abis }}
+        run: |
+          set -euo pipefail
+          apk=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+          echo "APK: $apk"
+          for abi in $ABIS; do
+            unzip -l "$apk" | grep -F "lib/$abi/libvnt_jni.so"
+          done
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VntApp-debug-${{ matrix.variant }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
