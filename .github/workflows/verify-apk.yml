@@ -37,6 +37,12 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
+      # 官方 settings.gradle.kts 把阿里云镜像放在首位；GitHub 美国 runner 访问
+      # aliyun 得 502，Gradle 会因单个仓库失败禁用整个 dependency configuration，
+      # 连累后面的 google()/mavenCentral()。验证流水线里移除中国专用镜像即可。
+      - name: Remove China-only Maven mirrors (use google/mavenCentral on GH runners)
+        run: sed -i '/maven\.aliyun\.com/d' settings.gradle.kts
+
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
